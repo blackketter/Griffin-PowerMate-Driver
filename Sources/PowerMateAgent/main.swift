@@ -26,12 +26,30 @@ let scrollLinesPerStep: Int32 = 2
 var scrollReversed = false
 var volumeAccumulator: Float = 0  // encoder steps toward next volume key press
 
-enum RotationMode { case scroll, volume }
+enum RotationMode: String { case scroll, volume }
 var rotationMode: RotationMode = .scroll
 
-enum ButtonAction { case mouseClick, rightClick, doubleClick, mute, playPause }
+enum ButtonAction: String { case mouseClick, rightClick, doubleClick, mute, playPause }
 var clickAction: ButtonAction = .mouseClick
 var longPressAction: ButtonAction = .rightClick
+
+// MARK: - Preferences
+
+func loadPrefs() {
+    let d = UserDefaults.standard
+    if let s = d.string(forKey: "rotationMode"),    let v = RotationMode(rawValue: s)  { rotationMode    = v }
+    if let s = d.string(forKey: "clickAction"),     let v = ButtonAction(rawValue: s)  { clickAction     = v }
+    if let s = d.string(forKey: "longPressAction"), let v = ButtonAction(rawValue: s)  { longPressAction = v }
+    scrollReversed = d.bool(forKey: "scrollReversed")
+}
+
+func savePrefs() {
+    let d = UserDefaults.standard
+    d.set(rotationMode.rawValue,    forKey: "rotationMode")
+    d.set(clickAction.rawValue,     forKey: "clickAction")
+    d.set(longPressAction.rawValue, forKey: "longPressAction")
+    d.set(scrollReversed,           forKey: "scrollReversed")
+}
 
 // NX key type: PLAY=16 (play/pause via synthetic event)
 func postMediaKey(_ keyType: Int32, down: Bool) {
@@ -316,6 +334,7 @@ driver.onButtonUp = {
     }
 }
 
+loadPrefs()
 driver.start()
 
 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -362,19 +381,19 @@ final class MenuHandler: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) { updateMenuState() }
 
-    @objc func toggleScrollReversed() { scrollReversed.toggle(); updateMenuState() }
-    @objc func setRotationScroll() { rotationMode = .scroll; updateMenuState() }
-    @objc func setRotationVolume() { rotationMode = .volume; updateMenuState() }
-    @objc func setClickMouse() { clickAction = .mouseClick; updateMenuState() }
-    @objc func setClickRightClick() { clickAction = .rightClick; updateMenuState() }
-    @objc func setClickDoubleClick() { clickAction = .doubleClick; updateMenuState() }
-    @objc func setClickMute() { clickAction = .mute; updateMenuState() }
-    @objc func setClickPlayPause() { clickAction = .playPause; updateMenuState() }
-    @objc func setLongPressMouse() { longPressAction = .mouseClick; updateMenuState() }
-    @objc func setLongPressRightClick() { longPressAction = .rightClick; updateMenuState() }
-    @objc func setLongPressDoubleClick() { longPressAction = .doubleClick; updateMenuState() }
-    @objc func setLongPressMute() { longPressAction = .mute; updateMenuState() }
-    @objc func setLongPressPlayPause() { longPressAction = .playPause; updateMenuState() }
+    @objc func toggleScrollReversed() { scrollReversed.toggle();          savePrefs(); updateMenuState() }
+    @objc func setRotationScroll()    { rotationMode = .scroll;            savePrefs(); updateMenuState() }
+    @objc func setRotationVolume()    { rotationMode = .volume;            savePrefs(); updateMenuState() }
+    @objc func setClickMouse()        { clickAction = .mouseClick;         savePrefs(); updateMenuState() }
+    @objc func setClickRightClick()   { clickAction = .rightClick;         savePrefs(); updateMenuState() }
+    @objc func setClickDoubleClick()  { clickAction = .doubleClick;        savePrefs(); updateMenuState() }
+    @objc func setClickMute()         { clickAction = .mute;               savePrefs(); updateMenuState() }
+    @objc func setClickPlayPause()    { clickAction = .playPause;          savePrefs(); updateMenuState() }
+    @objc func setLongPressMouse()    { longPressAction = .mouseClick;     savePrefs(); updateMenuState() }
+    @objc func setLongPressRightClick(){ longPressAction = .rightClick;    savePrefs(); updateMenuState() }
+    @objc func setLongPressDoubleClick(){ longPressAction = .doubleClick;  savePrefs(); updateMenuState() }
+    @objc func setLongPressMute()     { longPressAction = .mute;           savePrefs(); updateMenuState() }
+    @objc func setLongPressPlayPause(){ longPressAction = .playPause;      savePrefs(); updateMenuState() }
 }
 
 let menuHandler = MenuHandler()
