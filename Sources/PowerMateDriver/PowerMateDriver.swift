@@ -145,8 +145,9 @@ public final class PowerMateDriver {
             driver.deviceRemoved(device)
         }, selfPtr)
 
-        if IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone)) != kIOReturnSuccess {
-            NSLog("PowerMateDriver: IOHIDManagerOpen failed (device may be in use)")
+        let managerOpenResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        if managerOpenResult != kIOReturnSuccess {
+            NSLog("PowerMateDriver: IOHIDManagerOpen failed with result %d (0x%08x)", managerOpenResult, UInt32(bitPattern: managerOpenResult))
             return
         }
 
@@ -180,8 +181,8 @@ public final class PowerMateDriver {
 
         NSLog("PowerMateDriver: Device matched, attempting to open...")
 
-        // Open with seize so we get exclusive access and input reports (macOS won't consume the device)
-        let openResult = IOHIDDeviceOpen(d, IOOptionBits(kIOHIDOptionsTypeSeizeDevice))
+        // Open without seize first; on macOS 12+ DriverKit owns the device and seize returns kIOReturnNotPermitted.
+        let openResult = IOHIDDeviceOpen(d, IOOptionBits(kIOHIDOptionsTypeNone))
         if openResult != kIOReturnSuccess {
             NSLog("PowerMateDriver: IOHIDDeviceOpen failed with result %d (try unplugging and replugging, or close other apps using the device)", openResult)
             return

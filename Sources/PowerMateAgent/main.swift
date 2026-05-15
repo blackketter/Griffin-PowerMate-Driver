@@ -15,6 +15,7 @@
 import Foundation
 import AppKit
 import CoreGraphics
+import CoreAudio
 import ApplicationServices
 import PowerMateDriver
 
@@ -23,6 +24,56 @@ let driver = PowerMateDriver()
 // Scroll: lines per knob step (sensitivity); user can reverse direction via menu
 let scrollLinesPerStep: Int32 = 2
 var scrollReversed = false
+var volumeAccumulator: Float = 0  // encoder steps toward next volume key press
+
+enum RotationMode { case scroll, volume }
+var rotationMode: RotationMode = .scroll
+
+enum ButtonAction { case mouseClick, rightClick, doubleClick, mute, playPause }
+var clickAction: ButtonAction = .mouseClick
+var longPressAction: ButtonAction = .rightClick
+
+// NX key type: PLAY=16 (play/pause via synthetic event)
+func postMediaKey(_ keyType: Int32, down: Bool) {
+    let flags = NSEvent.ModifierFlags(rawValue: down ? 0xa00 : 0xb00)
+    let data1 = Int((keyType << 16) | (down ? 0xa400 : 0xe400))
+    guard let e = NSEvent.otherEvent(with: .systemDefined, location: .zero,
+           modifierFlags: flags, timestamp: 0, windowNumber: 0,
+           context: nil, subtype: 8, data1: data1, data2: -1),
+          let cg = e.cgEvent else {
+        NSLog("postMediaKey: failed to create event for keyType=%d down=%d", keyType, down ? 1 : 0)
+        return
+    }
+    cg.post(tap: .cgSessionEventTap)
+}
+
+func postPlayPause() {
+    postMediaKey(16, down: true)
+    postMediaKey(16, down: false)
+}
+
+/// Post an NX consumer-control volume/mute event. These are system-defined events,
+/// not keyboard events — the correct mechanism for volume keys on macOS.
+func postNXVolumeKey(_ nxKeyType: Int32, down: Bool, fine: Bool = false) {
+    let data1 = Int((nxKeyType << 16) | (down ? 0x0a00 : 0x0b00))
+    let mods: NSEvent.ModifierFlags = fine ? [.option, .shift] : [.shift]
+    guard let e = NSEvent.otherEvent(
+        with: .systemDefined, location: .zero,
+        modifierFlags: mods,
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: 0, context: nil, subtype: 8,
+        data1: data1, data2: -1),
+        let cg = e.cgEvent else { return }
+    cg.flags = fine ? [.maskAlternate, .maskShift] : [.maskShift]
+    cg.post(tap: .cghidEventTap)
+}
+
+// Option+Shift gives fine steps (1/4 of a normal step) but re-enables the feedback sound.
+// Shift-only suppresses sound but uses full steps. No standard API offers both.
+// To silence feedback system-wide: System Settings → Sound → uncheck "Play feedback when volume is changed".
+func postVolumeUp()   { postNXVolumeKey(kNXVolumeUp,   down: true,  fine: true); postNXVolumeKey(kNXVolumeUp,   down: false, fine: true) }
+func postVolumeDown() { postNXVolumeKey(kNXVolumeDown, down: true,  fine: true); postNXVolumeKey(kNXVolumeDown, down: false, fine: true) }
+func toggleSystemMute() { postNXVolumeKey(kNXMute, down: true); postNXVolumeKey(kNXMute, down: false) }
 
 func postScroll(delta: Int) {
     var lines = Int32(delta) * scrollLinesPerStep
@@ -42,6 +93,10 @@ func postScroll(delta: Int) {
 private let kUpArrow: CGKeyCode = 0x7E
 private let kDownArrow: CGKeyCode = 0x7D
 private let kReturnKey: CGKeyCode = 0x24
+// NX consumer-control key types (not CGKeyCodes — volume is not a keyboard event)
+private let kNXVolumeUp: Int32 = 0
+private let kNXVolumeDown: Int32 = 1
+private let kNXMute: Int32 = 7
 
 /// Post one key press (down + up).
 func postKey(_ keyCode: CGKeyCode) {
@@ -90,6 +145,19 @@ func postMouseClick(button: CGMouseButton = .left) {
         let cocoa = NSEvent.mouseLocation
         let location = cocoaToQuartz(cocoa)
         postMouseClick(at: location, button: button)
+    }
+}
+
+func performButtonAction(_ action: ButtonAction) {
+    switch action {
+    case .mouseClick:  postMouseClick(button: .left)
+    case .rightClick:  postMouseClick(button: .right)
+    case .doubleClick:
+        let cocoa = NSEvent.mouseLocation
+        let location = cocoaToQuartz(cocoa)
+        postDoubleClick(at: location)
+    case .mute:        toggleSystemMute()
+    case .playPause:   postPlayPause()
     }
 }
 
@@ -164,7 +232,14 @@ driver.onRotate = { delta, _ in
                 DispatchQueue.main.asyncAfter(deadline: .now() + menuModeTimeoutInterval, execute: work)
             }
         } else {
-            postScroll(delta: delta)
+            switch rotationMode {
+            case .scroll:
+                postScroll(delta: delta)
+            case .volume:
+                volumeAccumulator += Float(delta)
+                while volumeAccumulator >= 6 { postVolumeUp(); volumeAccumulator -= 6 }
+                while volumeAccumulator <= -6 { postVolumeDown(); volumeAccumulator += 6 }
+            }
         }
     }
 }
@@ -177,27 +252,14 @@ driver.onClick = {
             // Menu mode will exit on the 5-second timeout when the user stops rotating.
         } else {
             exitMenuMode()
-            postMouseClick(button: .left)
+            performButtonAction(clickAction)
         }
     }
 }
 
-// Long-press action: right-click or double-click (chosen in menu)
-enum LongPressAction { case rightClick, doubleClick }
-var longPressAction: LongPressAction = .rightClick
-
 driver.onLongPress = {
     enterMenuMode()
-    switch longPressAction {
-    case .rightClick:
-        postMouseClick(button: .right)
-    case .doubleClick:
-        DispatchQueue.main.async {
-            let cocoa = NSEvent.mouseLocation
-            let location = cocoaToQuartz(cocoa)
-            postDoubleClick(at: location)
-        }
-    }
+    performButtonAction(longPressAction)
 }
 
 // Optional: LED feedback (dim when idle, throb while turning, full on when button held).
@@ -268,33 +330,51 @@ app.setActivationPolicy(.accessory)
 
 final class MenuHandler: NSObject, NSMenuDelegate {
     var reverseScrollItem: NSMenuItem!
+    var rotationScrollItem: NSMenuItem!
+    var rotationVolumeItem: NSMenuItem!
+    var clickMouseItem: NSMenuItem!
+    var clickRightClickItem: NSMenuItem!
+    var clickDoubleClickItem: NSMenuItem!
+    var clickMuteItem: NSMenuItem!
+    var clickPlayPauseItem: NSMenuItem!
+    var longPressMouseItem: NSMenuItem!
     var longPressRightItem: NSMenuItem!
     var longPressDoubleItem: NSMenuItem!
+    var longPressMuteItem: NSMenuItem!
+    var longPressPlayPauseItem: NSMenuItem!
 
     func updateMenuState() {
         reverseScrollItem.state = scrollReversed ? .on : .off
+        reverseScrollItem.isEnabled = (rotationMode == .scroll)
+        rotationScrollItem.state = (rotationMode == .scroll) ? .on : .off
+        rotationVolumeItem.state = (rotationMode == .volume) ? .on : .off
+        clickMouseItem.state = (clickAction == .mouseClick) ? .on : .off
+        clickRightClickItem.state = (clickAction == .rightClick) ? .on : .off
+        clickDoubleClickItem.state = (clickAction == .doubleClick) ? .on : .off
+        clickMuteItem.state = (clickAction == .mute) ? .on : .off
+        clickPlayPauseItem.state = (clickAction == .playPause) ? .on : .off
+        longPressMouseItem.state = (longPressAction == .mouseClick) ? .on : .off
         longPressRightItem.state = (longPressAction == .rightClick) ? .on : .off
         longPressDoubleItem.state = (longPressAction == .doubleClick) ? .on : .off
+        longPressMuteItem.state = (longPressAction == .mute) ? .on : .off
+        longPressPlayPauseItem.state = (longPressAction == .playPause) ? .on : .off
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
-        updateMenuState()
-    }
+    func menuWillOpen(_ menu: NSMenu) { updateMenuState() }
 
-    @objc func toggleScrollReversed() {
-        scrollReversed.toggle()
-        updateMenuState()
-    }
-
-    @objc func setLongPressRightClick() {
-        longPressAction = .rightClick
-        updateMenuState()
-    }
-
-    @objc func setLongPressDoubleClick() {
-        longPressAction = .doubleClick
-        updateMenuState()
-    }
+    @objc func toggleScrollReversed() { scrollReversed.toggle(); updateMenuState() }
+    @objc func setRotationScroll() { rotationMode = .scroll; updateMenuState() }
+    @objc func setRotationVolume() { rotationMode = .volume; updateMenuState() }
+    @objc func setClickMouse() { clickAction = .mouseClick; updateMenuState() }
+    @objc func setClickRightClick() { clickAction = .rightClick; updateMenuState() }
+    @objc func setClickDoubleClick() { clickAction = .doubleClick; updateMenuState() }
+    @objc func setClickMute() { clickAction = .mute; updateMenuState() }
+    @objc func setClickPlayPause() { clickAction = .playPause; updateMenuState() }
+    @objc func setLongPressMouse() { longPressAction = .mouseClick; updateMenuState() }
+    @objc func setLongPressRightClick() { longPressAction = .rightClick; updateMenuState() }
+    @objc func setLongPressDoubleClick() { longPressAction = .doubleClick; updateMenuState() }
+    @objc func setLongPressMute() { longPressAction = .mute; updateMenuState() }
+    @objc func setLongPressPlayPause() { longPressAction = .playPause; updateMenuState() }
 }
 
 let menuHandler = MenuHandler()
@@ -306,21 +386,73 @@ if let button = statusItem.button {
 let menu = NSMenu()
 menu.delegate = menuHandler
 
+let rotationMenu = NSMenu()
+let rotScrollItem = NSMenuItem(title: "Scroll", action: #selector(MenuHandler.setRotationScroll), keyEquivalent: "")
+rotScrollItem.target = menuHandler
+menuHandler.rotationScrollItem = rotScrollItem
+rotationMenu.addItem(rotScrollItem)
+let rotVolumeItem = NSMenuItem(title: "Volume", action: #selector(MenuHandler.setRotationVolume), keyEquivalent: "")
+rotVolumeItem.target = menuHandler
+menuHandler.rotationVolumeItem = rotVolumeItem
+rotationMenu.addItem(rotVolumeItem)
+rotationMenu.addItem(NSMenuItem.separator())
 let reverseItem = NSMenuItem(title: "Reverse scroll direction", action: #selector(MenuHandler.toggleScrollReversed), keyEquivalent: "")
 reverseItem.target = menuHandler
 menuHandler.reverseScrollItem = reverseItem
-menu.addItem(reverseItem)
+rotationMenu.addItem(reverseItem)
+let rotationSub = NSMenuItem(title: "Rotation", action: nil, keyEquivalent: "")
+rotationSub.submenu = rotationMenu
+menu.addItem(rotationSub)
 
-let longPressMenu = NSMenu()
-let longPressRightItem = NSMenuItem(title: "Right-click", action: #selector(MenuHandler.setLongPressRightClick), keyEquivalent: "")
-longPressRightItem.target = menuHandler
-menuHandler.longPressRightItem = longPressRightItem
-longPressMenu.addItem(longPressRightItem)
-let longPressDoubleItem = NSMenuItem(title: "Double-click", action: #selector(MenuHandler.setLongPressDoubleClick), keyEquivalent: "")
-longPressDoubleItem.target = menuHandler
-menuHandler.longPressDoubleItem = longPressDoubleItem
-longPressMenu.addItem(longPressDoubleItem)
+func makeButtonActionMenu(
+    mouseAction: Selector, rightAction: Selector, doubleAction: Selector,
+    muteAction: Selector, playPauseAction: Selector,
+    mouseItem: inout NSMenuItem!, rightItem: inout NSMenuItem!,
+    doubleItem: inout NSMenuItem!, muteItem: inout NSMenuItem!, playPauseItem: inout NSMenuItem!
+) -> NSMenu {
+    let m = NSMenu()
+    func add(_ title: String, _ sel: Selector, _ item: inout NSMenuItem!) {
+        let i = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+        i.target = menuHandler
+        item = i
+        m.addItem(i)
+    }
+    add("Mouse click",  mouseAction,     &mouseItem)
+    add("Right-click",  rightAction,     &rightItem)
+    add("Double-click", doubleAction,    &doubleItem)
+    add("Mute",         muteAction,      &muteItem)
+    add("Play / Pause", playPauseAction, &playPauseItem)
+    return m
+}
 
+let clickMenu = makeButtonActionMenu(
+    mouseAction: #selector(MenuHandler.setClickMouse),
+    rightAction: #selector(MenuHandler.setClickRightClick),
+    doubleAction: #selector(MenuHandler.setClickDoubleClick),
+    muteAction: #selector(MenuHandler.setClickMute),
+    playPauseAction: #selector(MenuHandler.setClickPlayPause),
+    mouseItem: &menuHandler.clickMouseItem,
+    rightItem: &menuHandler.clickRightClickItem,
+    doubleItem: &menuHandler.clickDoubleClickItem,
+    muteItem: &menuHandler.clickMuteItem,
+    playPauseItem: &menuHandler.clickPlayPauseItem
+)
+let clickSub = NSMenuItem(title: "Click", action: nil, keyEquivalent: "")
+clickSub.submenu = clickMenu
+menu.addItem(clickSub)
+
+let longPressMenu = makeButtonActionMenu(
+    mouseAction: #selector(MenuHandler.setLongPressMouse),
+    rightAction: #selector(MenuHandler.setLongPressRightClick),
+    doubleAction: #selector(MenuHandler.setLongPressDoubleClick),
+    muteAction: #selector(MenuHandler.setLongPressMute),
+    playPauseAction: #selector(MenuHandler.setLongPressPlayPause),
+    mouseItem: &menuHandler.longPressMouseItem,
+    rightItem: &menuHandler.longPressRightItem,
+    doubleItem: &menuHandler.longPressDoubleItem,
+    muteItem: &menuHandler.longPressMuteItem,
+    playPauseItem: &menuHandler.longPressPlayPauseItem
+)
 let longPressSub = NSMenuItem(title: "Long press", action: nil, keyEquivalent: "")
 longPressSub.submenu = longPressMenu
 menu.addItem(longPressSub)

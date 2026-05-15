@@ -28,11 +28,17 @@ let package = Package(
             dependencies: ["PowerMateDriver"],
             path: "Sources/PowerMateDemo"
         ),
+        .target(
+            name: "CVolumeKeys",
+            path: "Sources/CVolumeKeys",
+            publicHeadersPath: ".",
+            linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("CoreFoundation")]
+        ),
         .executableTarget(
             name: "PowerMateAgent",
             dependencies: ["PowerMateDriver"],
             path: "Sources/PowerMateAgent",
-            linkerSettings: [.linkedFramework("CoreGraphics"), .linkedFramework("AppKit"), .linkedFramework("ApplicationServices")]
+            linkerSettings: [.linkedFramework("CoreGraphics"), .linkedFramework("AppKit"), .linkedFramework("ApplicationServices"), .linkedFramework("CoreAudio")]
         ),
     ]
 )
