@@ -26,6 +26,13 @@ let scrollLinesPerStep: Int32 = 2
 var scrollReversed = false
 var volumeAccumulator: Float = 0  // encoder steps toward next volume key press
 
+// Timestamps used by the CGEvent suppression tap to swallow the OS default
+// HID mapping (cursor movement and mouse click) that DriverKit generates even
+// when we have the device seized at the IOHIDDevice level.
+var pmButtonEventTime: CFAbsoluteTime = 0
+var pmRotationEventTime: CFAbsoluteTime = 0
+let kPMSuppressionWindow: CFAbsoluteTime = 0.06  // 60 ms
+
 enum RotationMode: String { case scroll, volume }
 var rotationMode: RotationMode = .scroll
 
@@ -49,6 +56,47 @@ func savePrefs() {
     d.set(clickAction.rawValue,     forKey: "clickAction")
     d.set(longPressAction.rawValue, forKey: "longPressAction")
     d.set(scrollReversed,           forKey: "scrollReversed")
+}
+
+// MARK: - OS default HID event suppression
+
+/// Install an active CGEvent tap that swallows the cursor movement and mouse
+/// click events that macOS's DriverKit HID mapping generates for the PowerMate.
+/// Requires Accessibility permission; logs and no-ops if unavailable.
+func setupEventSuppression() {
+    guard AXIsProcessTrusted() else {
+        NSLog("PowerMateAgent: Accessibility not granted — OS cursor/click events from PowerMate not suppressed")
+        return
+    }
+    let mask: CGEventMask =
+        (1 << CGEventType.leftMouseDown.rawValue) |
+        (1 << CGEventType.leftMouseUp.rawValue)   |
+        (1 << CGEventType.mouseMoved.rawValue)
+    guard let tap = CGEvent.tapCreate(
+        tap: .cghidEventTap,
+        place: .headInsertEventTap,
+        options: .defaultTap,
+        eventsOfInterest: mask,
+        callback: { _, type, event, _ -> Unmanaged<CGEvent>? in
+            let now = CFAbsoluteTimeGetCurrent()
+            // Suppress OS click events correlated with PowerMate button reports.
+            if (type == .leftMouseDown || type == .leftMouseUp),
+               now - pmButtonEventTime < kPMSuppressionWindow { return nil }
+            // Suppress purely horizontal cursor movement correlated with rotation.
+            if type == .mouseMoved,
+               now - pmRotationEventTime < kPMSuppressionWindow,
+               abs(event.getDoubleValueField(.mouseEventDeltaY)) < 0.5 { return nil }
+            return Unmanaged.passUnretained(event)
+        },
+        userInfo: nil
+    ) else {
+        NSLog("PowerMateAgent: Failed to install event suppression tap")
+        return
+    }
+    let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+    CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
+    CGEvent.tapEnable(tap: tap, enable: true)
+    NSLog("PowerMateAgent: Event suppression tap installed")
 }
 
 func postPlayPause() {
@@ -225,6 +273,7 @@ func exitMenuMode() {
 }
 
 driver.onRotate = { delta, _ in
+    pmRotationEventTime = CFAbsoluteTimeGetCurrent()
     DispatchQueue.main.async {
         lastRotationTime = CFAbsoluteTimeGetCurrent()
         startThrob()
@@ -312,10 +361,12 @@ func startThrob() {
 }
 
 driver.onButtonDown = {
+    pmButtonEventTime = CFAbsoluteTimeGetCurrent()
     isButtonDown = true
     setLEDOffMain(255)
 }
 driver.onButtonUp = {
+    pmButtonEventTime = CFAbsoluteTimeGetCurrent()
     isButtonDown = false
     if throbTimer != nil {
         lastRotationTime = CFAbsoluteTimeGetCurrent()
@@ -325,6 +376,7 @@ driver.onButtonUp = {
 }
 
 loadPrefs()
+setupEventSuppression()
 driver.start()
 
 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {

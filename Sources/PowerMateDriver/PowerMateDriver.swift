@@ -181,8 +181,15 @@ public final class PowerMateDriver {
 
         NSLog("PowerMateDriver: Device matched, attempting to open...")
 
-        // Open without seize first; on macOS 12+ DriverKit owns the device and seize returns kIOReturnNotPermitted.
-        let openResult = IOHIDDeviceOpen(d, IOOptionBits(kIOHIDOptionsTypeNone))
+        // Try to seize exclusively so the OS default HID mapping (cursor movement, click) is suppressed.
+        // Falls back to shared open if seizure is unavailable (e.g. DriverKit-managed on some macOS versions).
+        var openResult = IOHIDDeviceOpen(d, IOOptionBits(kIOHIDOptionsTypeSeizeDevice))
+        if openResult != kIOReturnSuccess {
+            NSLog("PowerMateDriver: Seize unavailable (0x%08x), falling back to shared open", UInt32(bitPattern: openResult))
+            openResult = IOHIDDeviceOpen(d, IOOptionBits(kIOHIDOptionsTypeNone))
+        } else {
+            NSLog("PowerMateDriver: Device seized exclusively (OS default HID mapping suppressed)")
+        }
         if openResult != kIOReturnSuccess {
             NSLog("PowerMateDriver: IOHIDDeviceOpen failed with result %d (try unplugging and replugging, or close other apps using the device)", openResult)
             return
