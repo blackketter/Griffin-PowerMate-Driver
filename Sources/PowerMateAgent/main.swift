@@ -51,23 +51,13 @@ func savePrefs() {
     d.set(scrollReversed,           forKey: "scrollReversed")
 }
 
-// NX key type: PLAY=16 (play/pause via synthetic event)
-func postMediaKey(_ keyType: Int32, down: Bool) {
-    let flags = NSEvent.ModifierFlags(rawValue: down ? 0xa00 : 0xb00)
-    let data1 = Int((keyType << 16) | (down ? 0xa400 : 0xe400))
-    guard let e = NSEvent.otherEvent(with: .systemDefined, location: .zero,
-           modifierFlags: flags, timestamp: 0, windowNumber: 0,
-           context: nil, subtype: 8, data1: data1, data2: -1),
-          let cg = e.cgEvent else {
-        NSLog("postMediaKey: failed to create event for keyType=%d down=%d", keyType, down ? 1 : 0)
-        return
-    }
-    cg.post(tap: .cgSessionEventTap)
-}
-
 func postPlayPause() {
-    postMediaKey(16, down: true)
-    postMediaKey(16, down: false)
+    // MediaRemote private framework: MRMediaRemoteSendCommand(kMRTogglePlayPause=2)
+    // This is the only reliable path for play/pause on macOS 15+ (NX events are ignored).
+    Bundle(path: "/System/Library/PrivateFrameworks/MediaRemote.framework")?.load()
+    guard let ptr = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "MRMediaRemoteSendCommand") else { return }
+    typealias MRSendCmd = @convention(c) (UInt32, AnyObject?) -> Void
+    unsafeBitCast(ptr, to: MRSendCmd.self)(2, nil)
 }
 
 /// Post an NX consumer-control volume/mute event. These are system-defined events,
